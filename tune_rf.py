@@ -1,15 +1,12 @@
 """
 Перебор гиперпараметров RandomForest на validation RMSLE.
 
-Запуск из папки проекта:
+Запуск:
     source .venv/bin/activate
     python tune_rf.py
 
-Скрипт:
-1) готовит данные так же, как ноутбук;
-2) перебирает комбинации параметров;
-3) печатает топ результатов и лучшие параметры;
-4) пишет полную таблицу в tune_results.csv.
+Меняй GRID и FEATURES под новые опыты.
+Результат: tune_results.csv + печать топа.
 """
 
 from __future__ import annotations
@@ -27,15 +24,22 @@ from sklearn.preprocessing import LabelEncoder
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
 
-# Сетку можно менять под новые эксперименты
+# Признаки из разведки ошибок / экспериментов
+FEATURES = ("Qual_x_SF", "KitchenQualNum")
+
 GRID = {
-    "n_estimators": [400, 600, 800, 1000],
-    "min_samples_leaf": [1, 2, 3],
-    "max_features": [0.3, 0.4, 0.5, "sqrt"],
+    "n_estimators": [300, 400, 500, 700],
+    "min_samples_leaf": [1, 2],
+    "min_samples_split": [2, 5],
+    "max_features": [0.35, 0.4, 0.45],
+    "max_depth": [None, 20, 30],
 }
 
+KQ = {"Ex": 5, "Gd": 4, "TA": 3, "Fa": 2, "Po": 1}
 
-def prepare_xy():
+
+def prepare_xy(features=FEATURES):
+    features = set(features)
     train = pd.read_csv(DATA / "train.csv")
     test = pd.read_csv(DATA / "test.csv")
 
@@ -85,6 +89,27 @@ def prepare_xy():
         df["Age"] = df["YrSold"] - df["YearBuilt"]
         df["RemodAge"] = df["YrSold"] - df["YearRemodAdd"]
 
+        if "Qual_x_SF" in features:
+            df["Qual_x_SF"] = df["OverallQual"] * df["TotalSF"]
+        if "Has2ndFlr" in features:
+            df["Has2ndFlr"] = (df["2ndFlrSF"] > 0).astype(int)
+        if "KitchenQualNum" in features:
+            df["KitchenQualNum"] = df["KitchenQual"].map(KQ).fillna(3)
+        if "OldLowQual" in features:
+            df["OldLowQual"] = (
+                (df["Age"] >= 40) & (df["OverallQual"] <= 5)
+            ).astype(int)
+        if "IsAbnormal" in features:
+            df["IsAbnormal"] = (df["SaleCondition"] == "Abnorml").astype(int)
+        if "TotalPorch" in features:
+            df["TotalPorch"] = (
+                df["OpenPorchSF"]
+                + df["EnclosedPorch"]
+                + df["3SsnPorch"]
+                + df["ScreenPorch"]
+                + df["WoodDeckSF"]
+            )
+
     num_cols = X.select_dtypes(include=[np.number]).columns
     cat_cols = X.select_dtypes(exclude=[np.number]).columns
 
@@ -117,50 +142,32 @@ def main():
     )
     y_val_price = np.expm1(y_val)
 
-    rows = []
-    combos = list(
-        itertools.product(
-            GRID["n_estimators"],
-            GRID["min_samples_leaf"],
-            GRID["max_features"],
-        )
-    )
-    print(f"Комбинаций: {len(combos)}")
+    keys = list(GRID.keys())
+    combos = list(itertools.product(*[GRID[k] for k in keys]))
+    print(f"Features: {FEATURES}")
+    print(f"Комбинаций параметров: {len(combos)}")
 
-    for i, (n, leaf, mf) in enumerate(combos, start=1):
+    rows = []
+    for i, vals in enumerate(combos, start=1):
+        params = dict(zip(keys, vals))
         model = RandomForestRegressor(
-            n_estimators=n,
-            min_samples_leaf=leaf,
-            max_features=mf,
-            random_state=42,
-            n_jobs=-1,
+            **params, random_state=42, n_jobs=-1
         )
         model.fit(X_tr, y_tr)
         pred = np.clip(np.expm1(model.predict(X_val)), 0, None)
         rmsle = float(np.sqrt(mean_squared_log_error(y_val_price, pred)))
-        rows.append(
-            {
-                "rmsle": rmsle,
-                "n_estimators": n,
-                "min_samples_leaf": leaf,
-                "max_features": mf,
-            }
-        )
-        print(f"[{i}/{len(combos)}] n={n} leaf={leaf} mf={mf} -> {rmsle:.5f}")
+        row = {"rmsle": rmsle, **params}
+        rows.append(row)
+        print(f"[{i}/{len(combos)}] {params} -> {rmsle:.5f}")
 
     results = pd.DataFrame(rows).sort_values("rmsle").reset_index(drop=True)
     out = ROOT / "tune_results.csv"
     results.to_csv(out, index=False)
 
-    best = results.iloc[0]
     print("\n=== TOP 10 ===")
     print(results.head(10).to_string(index=False))
-    print(f"\nЛучшее: {best.to_dict()}")
-    print(f"Таблица сохранена: {out}")
-    print(
-        "Подставь лучшие числа в RandomForestRegressor в house_prices_lab.ipynb "
-        "и пересобери submission."
-    )
+    print(f"\nЛучшее: {results.iloc[0].to_dict()}")
+    print(f"Таблица: {out}")
 
 
 if __name__ == "__main__":
